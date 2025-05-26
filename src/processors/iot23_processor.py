@@ -31,13 +31,14 @@ class IoT23Processor(BaseDataProcessor):
     def load_data(self, file_path: str) -> pd.DataFrame:
         """Load data from conn.log.labeled file"""
         file_path = Path(file_path)
-        print(f"\nReading file: {file_path}")
+        print(f"\n正在读取文件: {file_path}")
         
         # Read the file, skipping comment lines and parsing Zeek log format
         data = []
         line_count = 0
         valid_count = 0
         separator = None
+        actual_columns = None
         
         with open(file_path, 'r') as f:
             for line in f:
@@ -46,43 +47,68 @@ class IoT23Processor(BaseDataProcessor):
                 if line.startswith('#separator'):
                     separator = bytes(line.strip().split(' ')[1], 'utf-8').decode('unicode_escape')
                     continue
+                # Parse column names from header
+                if line.startswith('#fields'):
+                    fields_line = line.strip().split(separator)[1:]  # Skip '#fields'
+                    # Handle the case where the last field contains multiple column names
+                    actual_columns = []
+                    for field in fields_line[:-1]:
+                        actual_columns.append(field)
+                    # Split the last field which contains multiple columns
+                    last_field_parts = fields_line[-1].split()
+                    actual_columns.extend(last_field_parts)
+                    print(f"发现 {len(actual_columns)} 个字段: {actual_columns}")
+                    continue
                 # Skip other header lines
                 if line.startswith('#'):
                     continue
                     
                 # Process data lines
-                fields = line.strip().split(separator)
+                raw_fields = line.strip().split(separator)
+                
+                # Handle the case where the last field contains multiple values
+                if actual_columns and len(raw_fields) < len(actual_columns):
+                    # Split the last field to extract label and detailed-label
+                    fields = raw_fields[:-1]  # All fields except the last
+                    last_field_parts = raw_fields[-1].split(None, 2)  # Split into max 3 parts
+                    fields.extend(last_field_parts)
+                else:
+                    fields = raw_fields
+                
+                # Use actual columns if available
+                expected_fields = len(actual_columns) if actual_columns else len(self.columns)
                 
                 # Handle missing fields
-                if len(fields) < len(self.columns):
+                if len(fields) < expected_fields:
                     # Add empty values for missing fields
-                    fields.extend([None] * (len(self.columns) - len(fields)))
-                elif len(fields) > len(self.columns):
+                    fields.extend([None] * (expected_fields - len(fields)))
+                elif len(fields) > expected_fields:
                     # Truncate extra fields
-                    fields = fields[:len(self.columns)]
+                    fields = fields[:expected_fields]
                 
-                # Replace '-' with None for missing values
-                fields = [None if f == '-' or f == '(empty)' else f for f in fields]
+                # Replace '-' with None for missing values, but keep detailed labels intact
+                fields = [None if f == '-' else f for f in fields]
                 data.append(fields)
                 valid_count += 1
         
-        print(f"\nProcessed {line_count} lines")
-        print(f"Found {valid_count} valid records")
+        print(f"\n已处理 {line_count} 行")
+        print(f"找到 {valid_count} 条有效记录")
         
         if not data:
-            raise ValueError("No valid data records found in the file")
+            raise ValueError("文件中未找到有效的数据记录")
         
-        # Convert to DataFrame
-        df = pd.DataFrame(data, columns=self.columns)
-        print(f"\nDataFrame shape: {df.shape}")
-        print("\nSample of data:")
+        # Convert to DataFrame using actual columns if available
+        columns_to_use = actual_columns if actual_columns else self.columns
+        df = pd.DataFrame(data, columns=columns_to_use)
+        print(f"\n数据框形状: {df.shape}")
+        print("\n数据样例:")
         print(df.head())
         return df
         
     def preprocess(self, data: pd.DataFrame) -> pd.DataFrame:
         """Preprocess the data"""
-        print("\nPreprocessing data...")
-        print(f"Initial shape: {data.shape}")
+        print("\n正在预处理数据...")
+        print(f"初始形状: {data.shape}")
         
         # Convert numeric columns
         numeric_cols = ['id.orig_p', 'id.resp_p', 'duration', 'orig_bytes',
@@ -112,12 +138,12 @@ class IoT23Processor(BaseDataProcessor):
         # Convert timestamp
         data['ts'] = pd.to_datetime(data['ts'].astype(float), unit='s')
         
-        print(f"Final shape: {data.shape}")
+        print(f"最终形状: {data.shape}")
         return data
         
     def extract_features(self, data: pd.DataFrame) -> pd.DataFrame:
         """Extract features from data"""
-        print("\nExtracting features...")
+        print("\n正在提取特征...")
         features = pd.DataFrame()
         
         # Basic features
@@ -153,38 +179,62 @@ class IoT23Processor(BaseDataProcessor):
             pd.get_dummies(data['conn_state'], prefix='state')
         ], axis=1)
         
-        print(f"Extracted features shape: {features.shape}")
-        print("\nFeature columns:")
+        print(f"已提取特征形状: {features.shape}")
+        print("\n特征列:")
         print(features.columns.tolist())
         return features
         
     def prepare_labels(self, data: pd.DataFrame) -> tuple:
         """Prepare labels for type-A and type-B classification"""
-        print("\nPreparing labels...")
+        print("\n正在准备标签...")
         
-        # Binary labels (benign vs malicious)
-        binary_labels = (data['label'] != 'Benign').astype(int)
+        # 使用label字段来确定基本分类（Benign/Malicious）
+        def extract_ground_truth(label_str):
+            if pd.isna(label_str) or label_str in ['-', '(empty)', None]:
+                return 'unknown'
+            return str(label_str).lower()
         
-        # Type-A labels (main attack types)
-        # Extract main attack type from label and convert to one-hot encoding
-        main_types = data['label'].map(self.type_a_mapping).fillna(4)  # Map unknown to Attack
-        type_a_labels = pd.get_dummies(main_types).values
+        # 提取真实标签用于最终评估
+        data['ground_truth'] = data['label'].apply(extract_ground_truth)
         
-        # If there are missing classes in the data, add zero columns for them
-        if type_a_labels.shape[1] < len(self.type_a_mapping):
-            missing_cols = len(self.type_a_mapping) - type_a_labels.shape[1]
-            type_a_labels = np.hstack([
-                type_a_labels,
-                np.zeros((len(type_a_labels), missing_cols))
-            ])
+        # 根据零信任原则，所有样本初始都标记为unknown
+        # 这些标签将通过算法来预测和分类
+        data['initial_label'] = 'unknown'
         
-        # Type-B labels (attack subtypes)
-        # Extract detailed attack types
-        type_b_labels = pd.get_dummies(data['detailed-label']).values
+        # 为了训练目的，我们需要创建基于真实标签的训练标签
+        # 但在实际预测时，所有数据都从unknown开始
         
-        print(f"\nLabel counts:")
-        print(f"Binary labels: {np.bincount(binary_labels)}")
-        print(f"Type-A labels shape: {type_a_labels.shape}")
-        print(f"Type-B labels shape: {type_b_labels.shape}")
+        # Binary labels for training (基于真实标签)
+        binary_labels = (data['ground_truth'] == 'malicious').astype(int)
+        
+        # Type-A labels (简化的攻击类型分类)
+        self.type_a_mapping = {
+            'benign': 0,
+            'malicious': 1
+        }
+        
+        # 将真实标签映射为训练标签
+        data['attack_type'] = data['ground_truth'].apply(
+            lambda x: 'benign' if x == 'benign' else 'malicious'
+        )
+        
+        type_a_labels = pd.get_dummies(data['attack_type']).values
+        
+        # Type-B labels (使用真实标签作为子类型)
+        type_b_labels = pd.get_dummies(data['ground_truth']).values
+        
+        # 显示真实标签分布（用于验证数据质量）
+        print(f"\n真实标签分布（用于最终评估）:")
+        label_counts = data['ground_truth'].value_counts()
+        for label, count in label_counts.items():
+            percentage = (count / len(data)) * 100
+            print(f"  {label}: {count} 样本 ({percentage:.1f}%)")
+        
+        print(f"\n训练标签分布: {np.bincount(binary_labels)}")
+        print(f"类型A标签形状: {type_a_labels.shape}")
+        print(f"类型B标签形状: {type_b_labels.shape}")
+        
+        # 保存真实标签到实例变量，供后续评估使用
+        self.ground_truth_labels = data['ground_truth'].values
         
         return binary_labels, type_a_labels, type_b_labels 

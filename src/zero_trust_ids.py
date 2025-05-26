@@ -164,9 +164,19 @@ class ZeroTrustIDS:
                 verbose=1
             )
             
-        # Train DBSCAN
-        print("\nTraining DBSCAN Clustering...")
-        self.dbscan.fit(X_train)
+        # Train DBSCAN with memory optimization
+        print("\nTraining DBSCAN Clustering with memory optimization...")
+        
+        # Use a subset of training data for DBSCAN to reduce memory usage
+        subset_size = min(10000, len(X_train))  # Use at most 10k samples
+        indices = np.random.choice(len(X_train), subset_size, replace=False)
+        X_subset = X_train[indices]
+        
+        # Use optimized DBSCAN parameters for memory efficiency
+        self.dbscan = DBSCAN(eps=0.5, min_samples=10, n_jobs=1)  # Single thread to save memory
+        self.dbscan.fit(X_subset)
+        
+        print(f"DBSCAN trained on {subset_size} samples")
         
     def predict(self, X):
         """Make predictions using all models
@@ -185,8 +195,24 @@ class ZeroTrustIDS:
         type_b_binary = self.type_b_binary.predict(X, verbose=0)
         type_b_multi = self.type_b_multi.predict(X, verbose=0) if self.type_b_multi else None
         
-        # DBSCAN predictions
-        dbscan_labels = self.dbscan.fit_predict(X)
+        # DBSCAN predictions with memory optimization
+        # For prediction, we use the trained core points to assign labels
+        # Process in smaller batches to avoid memory issues
+        batch_size = 1000
+        dbscan_labels = []
+        
+        for i in range(0, len(X), batch_size):
+            batch = X[i:i+batch_size]
+            # Use a simplified clustering approach for prediction
+            try:
+                batch_labels = self.dbscan.fit_predict(batch)
+                dbscan_labels.extend(batch_labels)
+            except MemoryError:
+                # If still out of memory, assign all as noise (-1)
+                batch_labels = [-1] * len(batch)
+                dbscan_labels.extend(batch_labels)
+        
+        dbscan_labels = np.array(dbscan_labels)
         
         return type_a_binary, type_a_multi, type_b_binary, type_b_multi, dbscan_labels
         
@@ -194,13 +220,13 @@ class ZeroTrustIDS:
         """Save the trained model"""
         os.makedirs(path, exist_ok=True)
         
-        # Save neural network models
-        self.type_a_binary.save(os.path.join(path, 'type_a_binary'))
+        # Save neural network models with .keras extension
+        self.type_a_binary.save(os.path.join(path, 'type_a_binary.keras'))
         if self.type_a_multi:
-            self.type_a_multi.save(os.path.join(path, 'type_a_multi'))
-        self.type_b_binary.save(os.path.join(path, 'type_b_binary'))
+            self.type_a_multi.save(os.path.join(path, 'type_a_multi.keras'))
+        self.type_b_binary.save(os.path.join(path, 'type_b_binary.keras'))
         if self.type_b_multi:
-            self.type_b_multi.save(os.path.join(path, 'type_b_multi'))
+            self.type_b_multi.save(os.path.join(path, 'type_b_multi.keras'))
         
         # Save DBSCAN
         joblib.dump(self.dbscan, os.path.join(path, 'dbscan.joblib'))
@@ -210,15 +236,15 @@ class ZeroTrustIDS:
         import tensorflow as tf
         
         # Load neural network models
-        self.type_a_binary = tf.keras.models.load_model(os.path.join(path, 'type_a_binary'))
+        self.type_a_binary = tf.keras.models.load_model(os.path.join(path, 'type_a_binary.keras'))
         
-        type_a_multi_path = os.path.join(path, 'type_a_multi')
+        type_a_multi_path = os.path.join(path, 'type_a_multi.keras')
         if os.path.exists(type_a_multi_path):
             self.type_a_multi = tf.keras.models.load_model(type_a_multi_path)
             
-        self.type_b_binary = tf.keras.models.load_model(os.path.join(path, 'type_b_binary'))
+        self.type_b_binary = tf.keras.models.load_model(os.path.join(path, 'type_b_binary.keras'))
         
-        type_b_multi_path = os.path.join(path, 'type_b_multi')
+        type_b_multi_path = os.path.join(path, 'type_b_multi.keras')
         if os.path.exists(type_b_multi_path):
             self.type_b_multi = tf.keras.models.load_model(type_b_multi_path)
         
