@@ -191,11 +191,11 @@ class EnhancedZeroTrustIDS:
         
         # 优化器
         self.optimizers = {
-            'stage1_binary': optim.AdamW(self.stage1_binary.parameters(), lr=0.002, weight_decay=0.01, betas=(0.9, 0.999)),
-            'stage1_multi': optim.AdamW(self.stage1_multi.parameters(), lr=0.002, weight_decay=0.01, betas=(0.9, 0.999)),
-            'stage2_binary': optim.AdamW(self.stage2_binary.parameters(), lr=0.001, weight_decay=0.01, betas=(0.9, 0.999)),
-            'stage2_multi': optim.AdamW(self.stage2_multi.parameters(), lr=0.001, weight_decay=0.01, betas=(0.9, 0.999)),
-            'autoencoder': optim.AdamW(self.autoencoder.parameters(), lr=0.0005, weight_decay=0.01, betas=(0.9, 0.999))
+            'stage1_binary': optim.AdamW(self.stage1_binary.parameters(), lr=0.002, weight_decay=0.02, betas=(0.9, 0.999)),
+            'stage1_multi': optim.AdamW(self.stage1_multi.parameters(), lr=0.002, weight_decay=0.02, betas=(0.9, 0.999)),
+            'stage2_binary': optim.AdamW(self.stage2_binary.parameters(), lr=0.001, weight_decay=0.02, betas=(0.9, 0.999)),
+            'stage2_multi': optim.AdamW(self.stage2_multi.parameters(), lr=0.001, weight_decay=0.02, betas=(0.9, 0.999)),
+            'autoencoder': optim.AdamW(self.autoencoder.parameters(), lr=0.0005, weight_decay=0.02, betas=(0.9, 0.999))
         }
         
         # 学习率调度器
@@ -276,20 +276,20 @@ class EnhancedZeroTrustIDS:
         save_dir.mkdir(exist_ok=True)
         
         best_val_loss = float('inf')
-        patience = 15  # 增加早停的耐心值
+        patience = 20  # 增强大规模：早停耐心值
         no_improve = 0
         
         # 重置优化器，使用更大的学习率
         self.optimizers['stage2_binary'] = optim.AdamW(
             self.stage2_binary.parameters(),
             lr=0.001,  # 降低学习率以获得更稳定的训练
-            weight_decay=0.01,
+            weight_decay=0.02,
             betas=(0.9, 0.999)
         )
         self.optimizers['stage2_multi'] = optim.AdamW(
             self.stage2_multi.parameters(),
             lr=0.001,  # 降低学习率以获得更稳定的训练
-            weight_decay=0.01,
+            weight_decay=0.02,
             betas=(0.9, 0.999)
         )
         
@@ -573,45 +573,75 @@ class EnhancedZeroTrustIDS:
         
         print(f"模型已从 {path_prefix}_* 加载")
     
-    def _train_binary_classifier(self, X, y):
-        """Train binary classifier for one epoch"""
-        X_tensor = torch.FloatTensor(X).to(self.device)
-        y_tensor = torch.LongTensor(y).to(self.device)
+    def _train_binary_classifier(self, X, y, batch_size=256):
+        """Train binary classifier for one epoch with batch processing"""
+        total_loss = 0
+        num_batches = 0
         
-        self.optimizers['stage1_binary'].zero_grad()
-        output = self.stage1_binary(X_tensor)
-        loss = self.criterion_cls(output, y_tensor)
+        # 随机打乱数据
+        indices = torch.randperm(len(X))
+        X_shuffled = X[indices]
+        y_shuffled = y[indices]
         
-        # Add L2 regularization
-        l2_lambda = 0.01
-        l2_norm = sum(p.pow(2.0).sum() for p in self.stage1_binary.parameters())
-        loss = loss + l2_lambda * l2_norm
+        for i in range(0, len(X), batch_size):
+            batch_X = X_shuffled[i:i+batch_size]
+            batch_y = y_shuffled[i:i+batch_size]
+            
+            X_tensor = torch.FloatTensor(batch_X).to(self.device)
+            y_tensor = torch.LongTensor(batch_y).to(self.device)
+            
+            self.optimizers['stage1_binary'].zero_grad()
+            output = self.stage1_binary(X_tensor)
+            loss = self.criterion_cls(output, y_tensor)
+            
+            # Add L2 regularization
+            l2_lambda = 0.02
+            l2_norm = sum(p.pow(2.0).sum() for p in self.stage1_binary.parameters())
+            loss = loss + l2_lambda * l2_norm
+            
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.stage1_binary.parameters(), max_norm=1.0)
+            self.optimizers['stage1_binary'].step()
+            
+            total_loss += loss.item()
+            num_batches += 1
         
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.stage1_binary.parameters(), max_norm=1.0)
-        self.optimizers['stage1_binary'].step()
-        
-        return loss.item()
+        return total_loss / num_batches
     
-    def _train_multi_classifier(self, X, y):
-        """Train multi-class classifier for one epoch"""
-        X_tensor = torch.FloatTensor(X).to(self.device)
-        y_tensor = torch.LongTensor(y).to(self.device)
+    def _train_multi_classifier(self, X, y, batch_size=256):
+        """Train multi-class classifier for one epoch with batch processing"""
+        total_loss = 0
+        num_batches = 0
         
-        self.optimizers['stage1_multi'].zero_grad()
-        output = self.stage1_multi(X_tensor)
-        loss = self.criterion_cls(output, y_tensor)
+        # 随机打乱数据
+        indices = torch.randperm(len(X))
+        X_shuffled = X[indices]
+        y_shuffled = y[indices]
         
-        # Add L2 regularization
-        l2_lambda = 0.01
-        l2_norm = sum(p.pow(2.0).sum() for p in self.stage1_multi.parameters())
-        loss = loss + l2_lambda * l2_norm
+        for i in range(0, len(X), batch_size):
+            batch_X = X_shuffled[i:i+batch_size]
+            batch_y = y_shuffled[i:i+batch_size]
+            
+            X_tensor = torch.FloatTensor(batch_X).to(self.device)
+            y_tensor = torch.LongTensor(batch_y).to(self.device)
+            
+            self.optimizers['stage1_multi'].zero_grad()
+            output = self.stage1_multi(X_tensor)
+            loss = self.criterion_cls(output, y_tensor)
+            
+            # Add L2 regularization
+            l2_lambda = 0.02
+            l2_norm = sum(p.pow(2.0).sum() for p in self.stage1_multi.parameters())
+            loss = loss + l2_lambda * l2_norm
+            
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.stage1_multi.parameters(), max_norm=1.0)
+            self.optimizers['stage1_multi'].step()
+            
+            total_loss += loss.item()
+            num_batches += 1
         
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.stage1_multi.parameters(), max_norm=1.0)
-        self.optimizers['stage1_multi'].step()
-        
-        return loss.item()
+        return total_loss / num_batches
     
     def _validate_stage1(self, X_val, y_bin_val, y_multi_val):
         """验证阶段1模型"""
@@ -660,82 +690,132 @@ class EnhancedZeroTrustIDS:
         
         return total_val_loss.item()
     
-    def _train_autoencoder_epoch(self, X_train):
-        """Train autoencoder for one epoch"""
-        X_train_tensor = torch.FloatTensor(X_train).to(self.device)
+    def _train_autoencoder_epoch(self, X_train, batch_size=256):
+        """Train autoencoder for one epoch with batch processing"""
+        total_loss = 0
+        num_batches = 0
         
-        self.optimizers['autoencoder'].zero_grad()
-        reconstructed = self.autoencoder(X_train_tensor)
+        # 随机打乱数据
+        indices = torch.randperm(len(X_train))
+        X_shuffled = X_train[indices]
         
-        # Reconstruction loss
-        recon_loss = self.criterion_ae(reconstructed, X_train_tensor)
+        for i in range(0, len(X_train), batch_size):
+            batch_X = X_shuffled[i:i+batch_size]
+            X_train_tensor = torch.FloatTensor(batch_X).to(self.device)
+            
+            self.optimizers['autoencoder'].zero_grad()
+            reconstructed = self.autoencoder(X_train_tensor)
+            
+            # Reconstruction loss
+            recon_loss = self.criterion_ae(reconstructed, X_train_tensor)
+            
+            # Add KL divergence loss for regularization
+            encoded = self.autoencoder.encode(X_train_tensor)
+            kl_loss = -0.5 * torch.mean(1 + torch.log(torch.var(encoded, dim=0) + 1e-10) - torch.mean(encoded, dim=0).pow(2) - torch.var(encoded, dim=0))
+            
+            # Total loss
+            loss = recon_loss + 0.1 * kl_loss
+            
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.autoencoder.parameters(), max_norm=1.0)
+            self.optimizers['autoencoder'].step()
+            
+            total_loss += loss.item()
+            num_batches += 1
         
-        # Add KL divergence loss for regularization
-        encoded = self.autoencoder.encode(X_train_tensor)
-        kl_loss = -0.5 * torch.mean(1 + torch.log(torch.var(encoded, dim=0) + 1e-10) - torch.mean(encoded, dim=0).pow(2) - torch.var(encoded, dim=0))
-        
-        # Total loss
-        loss = recon_loss + 0.1 * kl_loss
-        
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.autoencoder.parameters(), max_norm=1.0)
-        self.optimizers['autoencoder'].step()
-        
-        return loss.item()
-    
-    def _validate_autoencoder(self, X_val):
-        """验证自编码器"""
-        X_val_tensor = torch.FloatTensor(X_val).to(self.device)
+        return total_loss / num_batches
+
+    def _validate_autoencoder(self, X_val, batch_size=256):
+        """验证自编码器 with batch processing"""
+        total_loss = 0
+        num_batches = 0
         
         with torch.no_grad():
-            val_reconstructed = self.autoencoder(X_val_tensor)
-            val_loss = self.criterion_ae(val_reconstructed, X_val_tensor)
+            for i in range(0, len(X_val), batch_size):
+                batch_X = X_val[i:i+batch_size]
+                X_val_tensor = torch.FloatTensor(batch_X).to(self.device)
+                
+                val_reconstructed = self.autoencoder(X_val_tensor)
+                val_loss = self.criterion_ae(val_reconstructed, X_val_tensor)
+                
+                total_loss += val_loss.item()
+                num_batches += 1
         
-        return val_loss.item()
-    
-    def _train_stage2_binary_classifier(self, X, y):
-        """训练阶段2二分类器 - 增强版"""
-        X_tensor = torch.FloatTensor(X).to(self.device)
-        y_tensor = torch.LongTensor(y).to(self.device)
+        return total_loss / num_batches
+
+    def _train_stage2_binary_classifier(self, X, y, batch_size=256):
+        """训练阶段2二分类器 - 增强版 with batch processing"""
+        total_loss = 0
+        num_batches = 0
         
-        self.optimizers['stage2_binary'].zero_grad()
-        output = self.stage2_binary(X_tensor)
+        # 随机打乱数据
+        indices = torch.randperm(len(X))
+        X_shuffled = X[indices]
+        y_shuffled = y[indices]
         
-        # 使用label smoothing的交叉熵损失
-        loss = self.criterion_cls(output, y_tensor)
+        for i in range(0, len(X), batch_size):
+            batch_X = X_shuffled[i:i+batch_size]
+            batch_y = y_shuffled[i:i+batch_size]
+            
+            X_tensor = torch.FloatTensor(batch_X).to(self.device)
+            y_tensor = torch.LongTensor(batch_y).to(self.device)
+            
+            self.optimizers['stage2_binary'].zero_grad()
+            output = self.stage2_binary(X_tensor)
+            
+            # 使用label smoothing的交叉熵损失
+            loss = self.criterion_cls(output, y_tensor)
+            
+            # Add L2 regularization
+            l2_lambda = 0.02
+            l2_norm = sum(p.pow(2.0).sum() for p in self.stage2_binary.parameters())
+            loss = loss + l2_lambda * l2_norm
+            
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.stage2_binary.parameters(), max_norm=1.0)
+            self.optimizers['stage2_binary'].step()
+            
+            total_loss += loss.item()
+            num_batches += 1
         
-        # Add L2 regularization
-        l2_lambda = 0.01
-        l2_norm = sum(p.pow(2.0).sum() for p in self.stage2_binary.parameters())
-        loss = loss + l2_lambda * l2_norm
+        return total_loss / num_batches
+
+    def _train_stage2_multi_classifier(self, X, y, focal_loss, batch_size=256):
+        """训练阶段2多分类器 - 使用focal loss with batch processing"""
+        total_loss = 0
+        num_batches = 0
         
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.stage2_binary.parameters(), max_norm=1.0)
-        self.optimizers['stage2_binary'].step()
+        # 随机打乱数据
+        indices = torch.randperm(len(X))
+        X_shuffled = X[indices]
+        y_shuffled = y[indices]
         
-        return loss.item()
-    
-    def _train_stage2_multi_classifier(self, X, y, focal_loss):
-        """训练阶段2多分类器 - 使用focal loss"""
-        X_tensor = torch.FloatTensor(X).to(self.device)
-        y_tensor = torch.LongTensor(y).to(self.device)
+        for i in range(0, len(X), batch_size):
+            batch_X = X_shuffled[i:i+batch_size]
+            batch_y = y_shuffled[i:i+batch_size]
+            
+            X_tensor = torch.FloatTensor(batch_X).to(self.device)
+            y_tensor = torch.LongTensor(batch_y).to(self.device)
+            
+            self.optimizers['stage2_multi'].zero_grad()
+            output = self.stage2_multi(X_tensor)
+            
+            # 使用focal loss处理类别不平衡
+            loss = focal_loss(output, y_tensor)
+            
+            # Add L2 regularization
+            l2_lambda = 0.02
+            l2_norm = sum(p.pow(2.0).sum() for p in self.stage2_multi.parameters())
+            loss = loss + l2_lambda * l2_norm
+            
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.stage2_multi.parameters(), max_norm=1.0)
+            self.optimizers['stage2_multi'].step()
+            
+            total_loss += loss.item()
+            num_batches += 1
         
-        self.optimizers['stage2_multi'].zero_grad()
-        output = self.stage2_multi(X_tensor)
-        
-        # 使用focal loss处理类别不平衡
-        loss = focal_loss(output, y_tensor)
-        
-        # Add L2 regularization
-        l2_lambda = 0.01
-        l2_norm = sum(p.pow(2.0).sum() for p in self.stage2_multi.parameters())
-        loss = loss + l2_lambda * l2_norm
-        
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.stage2_multi.parameters(), max_norm=1.0)
-        self.optimizers['stage2_multi'].step()
-        
-        return loss.item()
+        return total_loss / num_batches
 
 class FocalLoss(nn.Module):
     """Focal Loss for addressing class imbalance"""

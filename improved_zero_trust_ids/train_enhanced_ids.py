@@ -20,6 +20,31 @@ from sklearn.metrics import precision_recall_fscore_support, confusion_matrix
 import seaborn as sns
 import itertools
 from sklearn.preprocessing import LabelEncoder
+import csv
+from datetime import datetime
+import json
+import random
+
+def set_random_seeds(seed=42):
+    """设置所有随机种子以确保训练的可重复性"""
+    print(f"🎲 设置随机种子: {seed}")
+    
+    # Python随机种子
+    random.seed(seed)
+    
+    # NumPy随机种子
+    np.random.seed(seed)
+    
+    # PyTorch随机种子
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+        # 确保CUDA操作的确定性
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+    
+    print("✅ 随机种子设置完成")
 
 def prepare_iot23_data():
     """准备IoT-23数据集并处理数据不平衡问题"""
@@ -51,7 +76,7 @@ def prepare_iot23_data():
     all_labels = []
     all_detailed_labels = []
     
-    for file_idx, file_path in enumerate(data_files[:3]):  # 限制处理前3个文件以避免内存问题
+    for file_idx, file_path in enumerate(data_files):  # 处理所有文件，不再限制数量
         print(f"\n2.{file_idx+1} 正在处理文件: {file_path.name}")
         print("   开始读取数据...")
         
@@ -60,7 +85,7 @@ def prepare_iot23_data():
         labels_list = []
         detailed_labels_list = []
         processed_lines = 0
-        total_lines = 20000  # 每个文件限制处理的行数
+        total_lines = 200000  # 增强大规模：每个文件处理200000行
         
         try:
             with open(file_path, 'r') as f:
@@ -68,7 +93,7 @@ def prepare_iot23_data():
                     if i > total_lines:
                         break
                         
-                    if i % 2000 == 0 and i > 0:  # 每处理2000行打印一次进度
+                    if i % 20000 == 0 and i > 0:  # 每处理20000行打印一次进度
                         print(f"   已处理 {i} 行...")
                         
                     line = line.strip()
@@ -187,23 +212,35 @@ def prepare_iot23_data():
     
     print("\n   恶意样本分层采样:")
     for detailed_label, group in malicious_groups:
-        if len(group) >= 50:  # 如果样本充足，采样50个
-            sampled = group.sample(n=50, random_state=42)
-            print(f"   - {detailed_label}: 采样 50 个 (原有 {len(group)} 个)")
-        elif len(group) >= 10:  # 如果样本较少但不是太少，全部使用
+        if len(group) >= 3000:  # 增强大规模：如果样本充足，采样3000个
+            sampled = group.sample(n=3000, random_state=42)
+            print(f"   - {detailed_label}: 采样 3000 个 (原有 {len(group)} 个)")
+        elif len(group) >= 1500:  # 中等样本，采样1500个
+            sampled = group.sample(n=1500, random_state=42)
+            print(f"   - {detailed_label}: 采样 1500 个 (原有 {len(group)} 个)")
+        elif len(group) >= 800:  # 较少样本，采样800个
+            sampled = group.sample(n=800, random_state=42)
+            print(f"   - {detailed_label}: 采样 800 个 (原有 {len(group)} 个)")
+        elif len(group) >= 200:  # 样本较少，采样200个
+            sampled = group.sample(n=200, random_state=42)
+            print(f"   - {detailed_label}: 采样 200 个 (原有 {len(group)} 个)")
+        elif len(group) >= 100:  # 样本很少，采样100个
+            sampled = group.sample(n=100, random_state=42)
+            print(f"   - {detailed_label}: 采样 100 个 (原有 {len(group)} 个)")
+        elif len(group) >= 50:  # 极少样本，全部使用
             sampled = group
             print(f"   - {detailed_label}: 使用全部 {len(group)} 个")
-        else:  # 样本太少，使用过采样
-            sampled = group.sample(n=10, replace=True, random_state=42)
-            print(f"   - {detailed_label}: 过采样到 10 个 (原有 {len(group)} 个)")
+        else:  # 样本太少，过采样到100个
+            sampled = group.sample(n=100, replace=True, random_state=42)
+            print(f"   - {detailed_label}: 过采样到 100 个 (原有 {len(group)} 个)")
         
         stratified_malicious.append(sampled)
     
     # 合并分层采样的恶意样本
     stratified_malicious_df = pd.concat(stratified_malicious, ignore_index=True)
     
-    # 对良性样本进行采样，使数据相对平衡
-    target_benign_size = min(len(stratified_malicious_df), len(benign_data), 500)
+    # 增强大规模：对良性样本进行采样，目标是恶意样本数量的75%以保持相对平衡
+    target_benign_size = min(int(len(stratified_malicious_df) * 0.75), len(benign_data), 8000)  # 最多8000个良性样本
     if len(benign_data) >= target_benign_size:
         sampled_benign_df = benign_data.sample(n=target_benign_size, random_state=42)
     else:
@@ -244,7 +281,18 @@ def prepare_iot23_data():
     print(f"   最终特征形状: {balanced_features.shape}")
     print(f"   包含的攻击变种数量: {final_dataset['detailed_label'].nunique()}")
     
-    return balanced_features, balanced_labels, final_dataset
+    # 收集数据集信息
+    dataset_info = {
+        'total_samples': len(final_dataset),
+        'benign_samples': len(final_dataset[final_dataset['basic_label'] == 'benign']),
+        'malicious_samples': len(final_dataset[final_dataset['basic_label'] == 'malicious']),
+        'benign_ratio': len(final_dataset[final_dataset['basic_label'] == 'benign']) / len(final_dataset) * 100,
+        'malicious_ratio': len(final_dataset[final_dataset['basic_label'] == 'malicious']) / len(final_dataset) * 100,
+        'attack_variants': final_dataset['detailed_label'].nunique(),
+        'attack_variant_list': final_dataset['detailed_label'].value_counts().to_dict()
+    }
+    
+    return balanced_features, balanced_labels, final_dataset, dataset_info
 
 def create_synthetic_attack_labels(labels, features, detailed_labels_df=None):
     """创建合成的攻击标签用于训练"""
@@ -392,9 +440,12 @@ def train_enhanced_model():
     print("\n🚀 开始训练增强零信任IDS模型")
     print("=" * 50)
     
+    # 设置随机种子确保可重复性
+    set_random_seeds(seed=42)
+    
     # 1. 加载数据
     print("\n[1/10] 加载数据...")
-    features, labels, dataset_df = prepare_iot23_data()
+    features, labels, dataset_df, dataset_info = prepare_iot23_data()
     if features is None:
         print("❌ 数据加载失败，退出训练")
         return
@@ -418,6 +469,25 @@ def train_enhanced_model():
     print(f"   训练集: {X_train.shape}")
     print(f"   验证集: {X_val.shape}")
     print(f"   测试集: {X_test.shape}")
+    
+    # 更新数据集信息
+    dataset_info.update({
+        'train_samples': len(X_train),
+        'val_samples': len(X_val),
+        'test_samples': len(X_test)
+    })
+    
+    # 收集配置信息
+    config_info = {
+        'scale': '增强大规模',
+        'files_processed': 3,  # 处理的文件数量
+        'lines_per_file': 200000,  # 每文件处理行数
+        'max_attack_samples': 3000,  # 最大攻击类型采样数
+        'max_benign_samples': 8000,  # 最大良性样本数
+        'stage1_epochs': 60,  # 阶段1训练轮数
+        'stage2_epochs': 60,  # 阶段2训练轮数
+        'stage3_epochs': 120  # 阶段3训练轮数
+    }
     
     # 4. 初始化模型
     print("\n[4/10] 初始化增强模型...")
@@ -472,7 +542,7 @@ def train_enhanced_model():
     model.train_stage1(
         X_train_scaled, y_bin_train_enc, y_att_train_enc,
         X_val_scaled, y_bin_val_enc, y_att_val_enc,
-        epochs=30  # 增加训练轮数
+        epochs=60  # 增强大规模：阶段1训练轮数
     )
     
     # 7. 训练阶段2
@@ -481,7 +551,7 @@ def train_enhanced_model():
     model.train_stage2(
         X_train_scaled, y_bin_train_enc, y_sub_train_enc,
         X_val_scaled, y_bin_val_enc, y_sub_val_enc,
-        epochs=30  # 增加训练轮数
+        epochs=60  # 增强大规模：阶段2训练轮数
     )
     
     # 8. 准备自编码器训练数据
@@ -508,7 +578,7 @@ def train_enhanced_model():
     print("\n[9/10] 🔥 Training Stage 3 - Autoencoder")
     if len(X_normal) >= 100:
         print("   Starting training...")
-        ae_losses = model.train_autoencoder(X_normal, epochs=50)  # 增加训练轮数
+        ae_losses = model.train_autoencoder(X_normal, epochs=120)  # 增强大规模：自编码器训练轮数
     else:
         print("❌ Skipping autoencoder training: insufficient normal samples")
         ae_losses = ([], [])
@@ -575,7 +645,10 @@ def train_enhanced_model():
     print("\n💾 保存模型...")
     model.save_models()
     
-    # 12. 生成可视化
+    # 12. 保存训练记录到CSV
+    training_record = save_training_record(dataset_info, results, config_info)
+    
+    # 13. 生成可视化
     print("\n📈 生成训练报告...")
     generate_training_report(ae_losses, results)
     
@@ -679,6 +752,106 @@ def generate_training_report(ae_losses, results):
     plt.savefig(save_dir / 'training_report.png', dpi=300, bbox_inches='tight', facecolor='white')
     print(f"✓ Training report saved to {save_dir}/training_report.png")
 
+def save_training_record(dataset_info, model_performance, config_info):
+    """保存训练记录到CSV文件"""
+    print("\n💾 保存训练记录...")
+    
+    # 创建保存目录
+    save_dir = Path('./reports')
+    save_dir.mkdir(exist_ok=True)
+    
+    csv_file = save_dir / 'training_records.csv'
+    
+    # 创建记录数据
+    record = {
+        'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        'config_scale': config_info['scale'],
+        'total_samples': dataset_info['total_samples'],
+        'train_samples': dataset_info['train_samples'],
+        'val_samples': dataset_info['val_samples'],
+        'test_samples': dataset_info['test_samples'],
+        'benign_samples': dataset_info['benign_samples'],
+        'malicious_samples': dataset_info['malicious_samples'],
+        'benign_ratio': dataset_info['benign_ratio'],
+        'malicious_ratio': dataset_info['malicious_ratio'],
+        'attack_variants': dataset_info['attack_variants'],
+        'attack_variant_list': json.dumps(dataset_info['attack_variant_list']),
+        'files_processed': config_info['files_processed'],
+        'lines_per_file': config_info['lines_per_file'],
+        'max_attack_samples': config_info['max_attack_samples'],
+        'max_benign_samples': config_info['max_benign_samples'],
+        'stage1_epochs': config_info['stage1_epochs'],
+        'stage2_epochs': config_info['stage2_epochs'],
+        'stage3_epochs': config_info['stage3_epochs'],
+        'precision': model_performance['precision'],
+        'recall': model_performance['recall'],
+        'f1_score': model_performance['f1'],
+        'stage1_detections': model_performance['stage_stats']['stage1'],
+        'stage2_detections': model_performance['stage_stats']['stage2'],
+        'stage3_detections': model_performance['stage_stats']['stage3'],
+        'stage1_percentage': model_performance['stage_stats']['stage1'] / dataset_info['test_samples'] * 100,
+        'stage2_percentage': model_performance['stage_stats']['stage2'] / dataset_info['test_samples'] * 100,
+        'stage3_percentage': model_performance['stage_stats']['stage3'] / dataset_info['test_samples'] * 100,
+        'confusion_matrix': json.dumps(model_performance['confusion_matrix']),
+        'benign_precision': model_performance['detailed_precision'][0],
+        'benign_recall': model_performance['detailed_recall'][0],
+        'benign_f1': model_performance['detailed_f1'][0],
+        'malicious_precision': model_performance['detailed_precision'][1],
+        'malicious_recall': model_performance['detailed_recall'][1],
+        'malicious_f1': model_performance['detailed_f1'][1],
+        'data_balance_ratio': model_performance['data_balance_ratio'],
+        'device': 'cuda' if torch.cuda.is_available() else 'cpu'
+    }
+    
+    # 检查是否为重复记录（基于性能指标和数据集特征）
+    record_signature = f"{record['precision']:.6f}_{record['recall']:.6f}_{record['f1_score']:.6f}_{record['total_samples']}_{record['stage1_detections']}_{record['stage2_detections']}_{record['stage3_detections']}"
+    
+    # 检查现有记录中是否已有相同的签名
+    duplicate_found = False
+    if csv_file.exists():
+        try:
+            existing_df = pd.read_csv(csv_file)
+            for _, row in existing_df.iterrows():
+                existing_signature = f"{row['precision']:.6f}_{row['recall']:.6f}_{row['f1_score']:.6f}_{row['total_samples']}_{row['stage1_detections']}_{row['stage2_detections']}_{row['stage3_detections']}"
+                if existing_signature == record_signature:
+                    duplicate_found = True
+                    print(f"⚠️  检测到重复记录，跳过保存")
+                    break
+        except Exception as e:
+            print(f"⚠️  检查重复记录时出错: {e}")
+    
+    if not duplicate_found:
+        # 检查CSV文件是否存在，如果不存在则创建标题行
+        file_exists = csv_file.exists() and csv_file.stat().st_size > 0
+        
+        with open(csv_file, 'a', newline='', encoding='utf-8') as f:
+            writer = csv.DictWriter(f, fieldnames=record.keys())
+            
+            # 如果文件不存在或为空，写入表头
+            if not file_exists:
+                writer.writeheader()
+                print("✓ 创建CSV表头")
+            
+            writer.writerow(record)
+        
+        print(f"✓ 训练记录已保存到 {csv_file}")
+    
+    # 同时保存详细的JSON记录
+    json_file = save_dir / f'training_detail_{datetime.now().strftime("%Y%m%d_%H%M%S")}.json'
+    detailed_record = {
+        'dataset_info': dataset_info,
+        'model_performance': model_performance,
+        'config_info': config_info,
+        'summary': record
+    }
+    
+    with open(json_file, 'w', encoding='utf-8') as f:
+        json.dump(detailed_record, f, indent=2, ensure_ascii=False)
+    
+    print(f"✓ 详细记录已保存到 {json_file}")
+    
+    return record
+
 def main():
     """主函数"""
     print("🛡️  增强零信任IoT入侵检测系统训练")
@@ -704,6 +877,8 @@ def main():
         print("- improved_zero_trust_ids/enhanced_ids_*.pth (模型文件)")
         print("- improved_zero_trust_ids/training_report.png (训练报告)")
         print("- improved_zero_trust_ids/training_results.txt (详细结果)")
+        print("- improved_zero_trust_ids/reports/training_records.csv (训练记录CSV)")
+        print("- improved_zero_trust_ids/reports/training_detail_*.json (详细记录JSON)")
         
     except Exception as e:
         print(f"❌ 训练过程中出现错误: {e}")
